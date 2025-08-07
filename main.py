@@ -13,7 +13,39 @@ import pinecone
 from sentence_transformers import SentenceTransformer
 import logging
 from pinecone import Pinecone, ServerlessSpec
+from fastapi import FastAPI
+from contextlib import asynccontextmanager
 
+pinecone_index = None  # Global index holder
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global pinecone_index
+
+    # Warm Pinecone index once
+    if PINECONE_INDEX_NAME not in pinecone_client.list_indexes().names():
+        pinecone_client.create_index(
+            name=PINECONE_INDEX_NAME,
+            dimension=EMBEDDING_DIMENSION,
+            metric="cosine",
+            spec=ServerlessSpec(cloud="aws", region="aws-starter")
+        )
+        logger.info("Created new Pinecone index. Waiting for it to be ready...")
+        time.sleep(10)
+
+    pinecone_index = pinecone_client.Index(PINECONE_INDEX_NAME)
+    logger.info("Pinecone index initialized.")
+    yield
+    logger.info("App shutdown")
+
+app = FastAPI(
+    title="LLM-Powered Intelligent Query-Retrieval System",
+    description="Processes large documents, performs contextual decisions, and provides explainable rationale.",
+    version="1.0.0",
+    lifespan=lifespan
+)
+import logging
+from fastapi.responses import JSONResponse
 app = FastAPI(
     title="LLM-Powered Intelligent Query-Retrieval System",
     description="Processes large documents, performs contextual decisions, and provides explainable rationale.",
@@ -40,10 +72,10 @@ RETRY_DELAY = 1
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-pinecone_client = Pinecone(api_key="pinecone_api")
+pinecone_client = Pinecone(api_key="")
 embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-genai.configure(api_key='gemini_api')
-model = genai.GenerativeModel('gemini-1.5-flash')
+genai.configure(api_key='')
+model = genai.GenerativeModel('gemini-2.0-flash-lite')
 
 # Helper Functions
 def get_embedding(text: str) -> List[float]:
@@ -81,7 +113,7 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]
             chunks.append(". ".join(current_chunk) + ".")
     return chunks
 
-def call_gemini_api_with_retry(prompt: str, max_retries: int = MAX_RETRIES) -> Optional[Dict[str, Any]]:
+def call_gemini_api_with_retry(prompt: str, max_retries: int = MAX_RETRIES) -> Dict[str, Any]:
     for attempt in range(max_retries):
         try:
             response = model.generate_content(
@@ -108,25 +140,24 @@ def call_gemini_api_with_retry(prompt: str, max_retries: int = MAX_RETRIES) -> O
                     return json.loads(clean_text)
                 except json.JSONDecodeError as e:
                     logger.error(f"JSON decode error: {e}")
-                    try:
-                        json_start = clean_text.find('{')
-                        json_end = clean_text.rfind('}') + 1
-                        return json.loads(clean_text[json_start:json_end])
-                    except:
-                        logger.error("Could not recover JSON from response")
-                        return {
-                            "answer": clean_text,
-                            "conditions": [],
-                            "rationale": "Response format error",
-                            "source_clauses_text": []
-                        }
+                    return {
+                        "answer": "Could not process response format",
+                        "conditions": [],
+                        "rationale": "Error parsing LLM response",
+                        "source_clauses_text": []
+                    }
         except Exception as e:
             logger.error(f"Attempt {attempt + 1} failed: {str(e)}")
             if attempt < max_retries - 1:
                 time.sleep(RETRY_DELAY * (attempt + 1))
-            continue
     logger.error("All retries exhausted for Gemini API call")
-    return None
+    # Fallback response dictionary to avoid returning None.
+    return {
+        "answer": " valid response from LLM after multiple attempts.",
+        "conditions": [],
+        "rationale": "LLM response",
+        "source_clauses_text": []
+    }
 
 def parse_document(file_content: bytes, filename: str) -> str:
     text = ""
@@ -166,18 +197,10 @@ def parse_document(file_content: bytes, filename: str) -> str:
 
 def upsert_to_pinecone(doc_id: str, chunks: List[Dict[str, Any]]) -> bool:
     try:
-        if PINECONE_INDEX_NAME not in pinecone_client.list_indexes().names():
-            pinecone_client.create_index(
-                name=PINECONE_INDEX_NAME,
-                dimension=EMBEDDING_DIMENSION,
-                metric="cosine",
-                spec=ServerlessSpec(cloud="aws", region="aws-starter")
-            )
-            time.sleep(10)
+        # Obtain the index directly from the Pinecone client
         index = pinecone_client.Index(PINECONE_INDEX_NAME)
-        vectors = []
-        for chunk in chunks:
-            vectors.append({
+        vectors = [
+            {
                 "id": chunk["metadata"]["id"],
                 "values": chunk["values"],
                 "metadata": {
@@ -185,15 +208,16 @@ def upsert_to_pinecone(doc_id: str, chunks: List[Dict[str, Any]]) -> bool:
                     "text": chunk["metadata"]["text"],
                     **chunk["metadata"].get("additional_metadata", {})
                 }
-            })
+            }
+            for chunk in chunks
+        ]
         for i in range(0, len(vectors), 100):
-            batch = vectors[i:i+100]
-            index.upsert(vectors=batch)
+            index.upsert(vectors=vectors[i:i + 100])
         return True
     except Exception as e:
         logger.error(f"Error upserting to Pinecone: {e}")
         return False
-
+    
 # Pydantic Models
 class SourceClause(BaseModel):
     clause_id: str
@@ -201,7 +225,7 @@ class SourceClause(BaseModel):
     doc_id: str
     score: Optional[float] = None
     metadata: Optional[Dict[str, Any]] = {}
-
+from typing import List, Dict, Optional, Any
 class QueryResponse(BaseModel):
     answer: str
     conditions: List[str]
@@ -229,27 +253,33 @@ class UnifiedQueryResponse(BaseModel):
     summary: Optional[str] = None
 
 # API Endpoints
+from fastapi.concurrency import run_in_threadpool
+
 @app.post("/upload_document", response_model=Dict[str, str])
 async def upload_document(file: UploadFile = File(...), doc_id: Optional[str] = None):
     if not doc_id:
         doc_id = f"doc_{int(time.time())}_{random.randint(1000, 9999)}"
     try:
         file_content = await file.read()
-        extracted_text = parse_document(file_content, file.filename)
-        text_chunks = chunk_text(extracted_text)
+        extracted_text = await run_in_threadpool(parse_document, file_content, file.filename)
+
+        text_chunks = await run_in_threadpool(chunk_text, extracted_text)
         if not text_chunks:
             raise HTTPException(status_code=400, detail="No text could be extracted or chunked from the document.")
-        ingestion_chunks = []
-        for i, chunk_text_content in enumerate(text_chunks):
-            ingestion_chunks.append({
+
+        ingestion_chunks = [
+            {
                 "chunk_id": f"{doc_id}_chunk_{i}",
                 "text": chunk_text_content
-            })
-        # Store in Pinecone
+            }
+            for i, chunk_text_content in enumerate(text_chunks)
+        ]
+
         chunks_to_store = []
+
         for idx, chunk_data in enumerate(ingestion_chunks):
             try:
-                embedding = get_embedding(chunk_data["text"])
+                embedding = await run_in_threadpool(get_embedding, chunk_data["text"])
                 chunks_to_store.append({
                     "values": embedding,
                     "metadata": {
@@ -266,88 +296,125 @@ async def upload_document(file: UploadFile = File(...), doc_id: Optional[str] = 
             except Exception as e:
                 logger.error(f"Error processing chunk {idx}: {e}")
                 continue
-        if not upsert_to_pinecone(doc_id, chunks_to_store):
+
+        success = await run_in_threadpool(upsert_to_pinecone, doc_id, chunks_to_store)
+        if not success:
             raise HTTPException(status_code=500, detail="Failed to store document in vector database")
+
         return {
             "message": f"Document '{file.filename}' processed successfully.",
             "doc_id": doc_id
         }
-    except HTTPException as e:
-        raise e
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Document processing error: {e}")
         raise HTTPException(status_code=500, detail=f"An error occurred during document processing: {e}")
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+from fastapi.concurrency import run_in_threadpool
+import asyncio
 
 @app.post("/unified_query", response_model=UnifiedQueryResponse)
 async def unified_query(query_input: UnifiedQueryInput):
-    try:
-        queries = query_input.get_queries()
-        responses = []
-        for q in queries:
-            try:
-                query_embedding = get_embedding(q)
-                pinecone_results = pinecone_client.Index(PINECONE_INDEX_NAME).query(
+    queries = query_input.get_queries()
+    responses = []
+    pinecone_index = pinecone_client.Index(PINECONE_INDEX_NAME)
+
+    async def process_single_query(q: str) -> QueryResponse:
+        try:
+            query_embedding = await run_in_threadpool(get_embedding, q)
+            pinecone_results = await run_in_threadpool(
+                lambda: pinecone_index.query(
                     vector=query_embedding,
                     top_k=query_input.top_k,
                     include_metadata=True,
                     filter={"doc_id": {"$eq": query_input.doc_id}} if query_input.doc_id else None
                 )
-                if not pinecone_results.matches:
-                    responses.append(QueryResponse(
-                        answer="No relevant information found",
-                        conditions=[],
-                        rationale="No matching content found",
-                        source_clauses=[],
-                        pinecone_matches=[]
-                    ))
-                    continue
-                context_text = "\n\n".join(
-                    f"Clause ID: {match['id']}\nText: {match['metadata']['text']}"
-                    for match in pinecone_results.matches
-                )
-                llm_prompt = f"""Analyze this query and context:
-                Query: {q}
-                Context: {context_text}
-                Provide JSON response with answer, conditions, rationale, and source clauses"""
-                llm_response = call_gemini_api_with_retry(llm_prompt)
-                responses.append(QueryResponse(
-                    answer=llm_response.get("answer", "No answer"),
-                    conditions=llm_response.get("conditions", []),
-                    rationale=llm_response.get("rationale", ""),
-                    source_clauses=[
-                        SourceClause(
-                            clause_id=match["id"],
-                            text=match["metadata"]["text"],
-                            doc_id=match["metadata"]["doc_id"],
-                            score=match["score"],
-                            metadata=match["metadata"]
-                        )
-                        for match in pinecone_results.matches
-                    ],
-                    pinecone_matches=[match for match in pinecone_results.matches]
-                ))
-            except Exception as e:
-                logger.error(f"Query failed: {e}")
-                responses.append(QueryResponse(
-                    answer=f"Error: {str(e)}",
+            )
+
+            matches = pinecone_results.matches or []
+            if not matches:
+                return QueryResponse(
+                    answer="No relevant information found",
                     conditions=[],
-                    rationale="Processing failed",
+                    rationale="No matching content found",
                     source_clauses=[],
                     pinecone_matches=[]
-                ))
-        summary = None
-        if query_input.include_summary and len(responses) > 1:
-            summary_prompt = "Summarize these responses:\n" + "\n".join(
-                f"Q: {q}\nA: {r.answer}" for q, r in zip(queries, responses))
-            summary_response = call_gemini_api_with_retry(summary_prompt)
-            summary = summary_response.get("answer") if summary_response else None
-        return UnifiedQueryResponse(
-            query_responses=responses,
-            summary=summary
-        )
-    except Exception as e:
-        logger.error(f"Unified query error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+                )
+
+            # Reduce payload in pinecone_matches (optional)
+            trimmed_matches = [
+                {
+                    "id": m["id"],
+                    "score": m.get("score"),
+                    "metadata": {
+                        "text": m["metadata"]["text"],
+                        "doc_id": m["metadata"]["doc_id"]
+                    }
+                } for m in matches
+            ]
+
+            # Format each clause's text using the helper function.
+            context_text = "\n\n".join(
+                f"Clause ID: {m['id']}\nText: {format_clause_text(m['metadata']['text'])}"
+                for m in matches
+            )
+
+            llm_prompt = f"""Analyze this query and context:
+Query: {q}
+Context: {context_text}
+Provide JSON response with answer, conditions, rationale, and source clauses"""
+
+            llm_response = await run_in_threadpool(call_gemini_api_with_retry, llm_prompt)
+
+            return QueryResponse(
+                answer=llm_response.get("answer", "No answer"),
+                conditions=llm_response.get("conditions", []),
+                rationale=llm_response.get("rationale", ""),
+                source_clauses=[
+                    SourceClause(
+                        clause_id=m["id"],
+                        text=format_clause_text(m["metadata"]["text"]),
+                        doc_id=m["metadata"]["doc_id"],
+                        score=m.get("score")
+                    ) for m in matches
+                ],
+                pinecone_matches=trimmed_matches
+            )
+        except Exception as e:
+            logger.error(f"Query failed: {e}")
+            return QueryResponse(
+                answer=f"Error: {str(e)}",
+                conditions=[],
+                rationale="Processing failed",
+                source_clauses=[],
+                pinecone_matches=[]
+            )
+
+    # Run queries in parallel
+    results = await asyncio.gather(*[process_single_query(q) for q in queries])
+    summary = None
+
+    if query_input.include_summary and len(results) > 1:
+        summary_prompt = "Summarize these responses:\n" + "\n".join(
+            f"Q: {q}\nA: {r.answer}" for q, r in zip(queries, results))
+        summary_response = await run_in_threadpool(call_gemini_api_with_retry, summary_prompt)
+        summary = summary_response.get("answer") if summary_response else None
+
+    return UnifiedQueryResponse(query_responses=results, summary=summary)
+
+# Add this helper function near your other helper functions, e.g., after chunk_text
+def format_clause_text(text: str) -> str:
+    """
+    Break the input text into individual non-empty, trimmed lines and join them.
+    This helps to align text properly.
+    """
+    # Split text by newline and punctuation if needed (here we split by newline)
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    # Optionally, further split by punctuation and reassemble if required
+    return "\n".join(lines)
 
 if __name__ == "__main__":
     import uvicorn
