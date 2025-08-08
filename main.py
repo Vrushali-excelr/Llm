@@ -71,10 +71,15 @@ RETRY_DELAY = 1
 # Initialize services
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-pinecone_client = Pinecone(api_key="pcsk_4rH5K6_EbeiWfcTcmhZdtZL8CJDpBTJFgkg86MU2Z53yVsbzd1B7WdUiGvKt7AQNQLEsd9")
 embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-genai.configure(api_key='AIzaSyDmC6CJm7L0ZF4Pqx4CaST4g0_KcUuua0U')
+import os
+
+pinecone_api_key = os.getenv("PINECONE_API_KEY")
+gemini_api_key = os.getenv("GEMINI_API_KEY")
+
+pinecone_client = Pinecone(api_key=pinecone_api_key)
+genai.configure(api_key=gemini_api_key)
+
 model = genai.GenerativeModel('gemini-2.0-flash-lite')
 
 # Helper Functions
@@ -413,4 +418,4 @@ def format_clause_text(text: str) -> str:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)s
+    uvicorn.run(app, host="0.0.0.0", port=8000)
