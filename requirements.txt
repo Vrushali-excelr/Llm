@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+# plus anything else you need
+PyPDF2
+python-docx
+google-generativeai
+pinecone-client
+sentence-transformers
+langchain
