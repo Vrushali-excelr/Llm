@@ -15,7 +15,10 @@ import logging
 from pinecone import Pinecone, ServerlessSpec
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
-
+from dotenv import load_dotenv
+load_dotenv()
+# Initialize Pinecone client
+from pinecone import Pinecone
 pinecone_index = None  # Global index holder
 
 @asynccontextmanager
