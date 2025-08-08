@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+.env
+.git/
+
+# Ignore Python cache files and environment variables
+# Ignore database files and Git directory
