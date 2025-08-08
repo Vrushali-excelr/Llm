@@ -72,9 +72,9 @@ RETRY_DELAY = 1
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-pinecone_client = Pinecone(api_key="")
+pinecone_client = Pinecone(api_key="pcsk_4rH5K6_EbeiWfcTcmhZdtZL8CJDpBTJFgkg86MU2Z53yVsbzd1B7WdUiGvKt7AQNQLEsd9")
 embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-genai.configure(api_key='')
+genai.configure(api_key='AIzaSyDmC6CJm7L0ZF4Pqx4CaST4g0_KcUuua0U')
 model = genai.GenerativeModel('gemini-2.0-flash-lite')
 
 # Helper Functions
@@ -236,7 +236,6 @@ class QueryResponse(BaseModel):
 class UnifiedQueryInput(BaseModel):
     query: Optional[str] = None
     queries: Optional[List[str]] = None
-    doc_id: Optional[str] = None
     top_k: int = 2
     include_summary: bool = False
 
@@ -319,7 +318,6 @@ import asyncio
 @app.post("/unified_query", response_model=UnifiedQueryResponse)
 async def unified_query(query_input: UnifiedQueryInput):
     queries = query_input.get_queries()
-    responses = []
     pinecone_index = pinecone_client.Index(PINECONE_INDEX_NAME)
 
     async def process_single_query(q: str) -> QueryResponse:
@@ -330,10 +328,9 @@ async def unified_query(query_input: UnifiedQueryInput):
                     vector=query_embedding,
                     top_k=query_input.top_k,
                     include_metadata=True,
-                    filter={"doc_id": {"$eq": query_input.doc_id}} if query_input.doc_id else None
+                    filter=None  # No document id filtering now.
                 )
             )
-
             matches = pinecone_results.matches or []
             if not matches:
                 return QueryResponse(
@@ -344,19 +341,17 @@ async def unified_query(query_input: UnifiedQueryInput):
                     pinecone_matches=[]
                 )
 
-            # Reduce payload in pinecone_matches (optional)
             trimmed_matches = [
                 {
                     "id": m["id"],
                     "score": m.get("score"),
                     "metadata": {
                         "text": m["metadata"]["text"],
-                        "doc_id": m["metadata"]["doc_id"]
+                        "doc_id": m["metadata"].get("doc_id", "")
                     }
                 } for m in matches
             ]
 
-            # Format each clause's text using the helper function.
             context_text = "\n\n".join(
                 f"Clause ID: {m['id']}\nText: {format_clause_text(m['metadata']['text'])}"
                 for m in matches
@@ -377,7 +372,7 @@ Provide JSON response with answer, conditions, rationale, and source clauses"""
                     SourceClause(
                         clause_id=m["id"],
                         text=format_clause_text(m["metadata"]["text"]),
-                        doc_id=m["metadata"]["doc_id"],
+                        doc_id=m["metadata"].get("doc_id", ""),
                         score=m.get("score")
                     ) for m in matches
                 ],
@@ -418,4 +413,4 @@ def format_clause_text(text: str) -> str:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)s
