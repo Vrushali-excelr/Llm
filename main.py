@@ -17,8 +17,7 @@ from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 load_dotenv()
-# Initialize Pinecone client
-from pinecone import Pinecone
+
 pinecone_index = None  # Global index holder
 
 @asynccontextmanager
@@ -422,4 +421,5 @@ def format_clause_text(text: str) -> str:
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
